@@ -23,7 +23,7 @@ def get_bilibili_comments(aid, page=1):
         print(f"获取第{page}页评论失败: {str(e)}")
         return None
 
-# 提取UP主的所有评论（顶层+楼中楼）
+# 提取UP主的所有评论（顶层+楼中楼）- 修复空值迭代Bug
 def extract_up_comments(all_comments_data, up_mid):
     up_comments = []
     up_mid_int = int(up_mid)
@@ -38,6 +38,10 @@ def extract_up_comments(all_comments_data, up_mid):
         
         # 遍历顶层评论
         for reply in replies:
+            # 容错：确保reply有必要的字段
+            if not reply or "mid" not in reply or "content" not in reply:
+                continue
+            
             # 打印每条评论的发布者ID（方便排查）
             comment_mid = reply.get("mid")
             comment_content = reply["content"]["message"][:20] + "..." if len(reply["content"]["message"]) > 20 else reply["content"]["message"]
@@ -51,9 +55,15 @@ def extract_up_comments(all_comments_data, up_mid):
                     "time": datetime.fromtimestamp(reply["ctime"]).strftime("%Y-%m-%d %H:%M:%S"),
                     "type": "顶层评论"
                 })
-            # 遍历楼中楼回复
-            sub_replies = reply.get("replies", [])
+            
+            # 遍历楼中楼回复 - 关键修复：先判断sub_replies是否为None
+            sub_replies = reply.get("replies", [])  # 用get默认值为空列表，避免None
+            if sub_replies is None:
+                sub_replies = []  # 双重保险：确保是可迭代的列表
+            
             for sub in sub_replies:
+                if not sub or "mid" not in sub or "content" not in sub:
+                    continue
                 sub_mid = sub.get("mid")
                 if sub_mid == up_mid_int:
                     up_comments.append({
