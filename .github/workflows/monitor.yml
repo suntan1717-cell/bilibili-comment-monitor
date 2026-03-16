@@ -2,7 +2,7 @@ name: B站UP主评论监控
 
 on:
   schedule:
-    - cron: '*/2 * * * *'
+    - cron: '*/3 * * * *'
   workflow_dispatch:
 
 jobs:
