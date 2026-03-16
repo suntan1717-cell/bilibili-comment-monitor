@@ -34,7 +34,7 @@ def get_bilibili_comments(aid, page=1):
         print(f"获取第{page}页评论失败: {str(e)}")
         return None
 
-# 单独获取楼中楼详情（解决漏回复问题）
+# 单独获取楼中楼详情（解决漏回复问题）- 核心修复：确保返回列表
 def get_sub_reply_detail(root_rpid, aid):
     url = f"https://api.bilibili.com/x/v2/reply/reply?oid={aid}&type=1&ps=50&pn=1&root={root_rpid}"
     try:
@@ -42,11 +42,11 @@ def get_sub_reply_detail(root_rpid, aid):
         response.raise_for_status()
         data = response.json()
         if data.get("code") != 0:
-            return []
+            return []  # 错误时返回空列表，不是None
         return data.get("data", {}).get("replies", [])
     except Exception as e:
         print(f"获取楼中楼详情失败(rpid={root_rpid}): {str(e)}")
-        return []
+        return []  # 异常时返回空列表，避免None
 
 # 生成评论指纹（去重核心）
 def generate_comment_fingerprint(comment):
@@ -90,9 +90,10 @@ def extract_up_comments(all_comments_data, up_mid):
             
             # 2. 检查楼中楼回复（基础版）
             sub_replies = root_reply.get("replies", []) or []
-            # 3. 单独请求楼中楼详情（解决漏回复）
-            if CHECK_SUB_REPLY_DETAIL:
-                sub_replies += get_sub_reply_detail(root_rpid, VIDEO_AID)
+            # 3. 单独请求楼中楼详情（解决漏回复）- 修复后不会返回None
+            if CHECK_SUB_REPLY_DETAIL and root_rpid:
+                sub_detail = get_sub_reply_detail(root_rpid, VIDEO_AID)
+                sub_replies += sub_detail  # 现在sub_detail一定是列表，不会报错
             
             # 遍历所有楼中楼回复
             for sub_reply in sub_replies:
