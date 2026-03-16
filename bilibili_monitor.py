@@ -3,25 +3,25 @@ import os
 import hashlib
 from datetime import datetime, timedelta
 
-# 配置项
+# 配置项（精准抓取最新评论）
 SENDKEY = os.getenv('SENDKEY')
 UP_MID = os.getenv('UP_MID')
 VIDEO_AID = os.getenv('VIDEO_AID')
-DUPLICATE_EXPIRE_HOURS = 12
-MAX_PAGE = 5
-CHECK_SUB_REPLY_DETAIL = True
+DUPLICATE_EXPIRE_HOURS = 24  # 覆盖API同步延迟
+MAX_PAGE = 8  # 前8页×50条=400条最新评论
+CHECK_SUB_REPLY_DETAIL = True  # 抓全楼中楼回复
 
-# 请求头
+# 请求头（模拟浏览器，提升稳定性）
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Referer": f"https://www.bilibili.com/video/BV{VIDEO_AID}/",
     "Accept-Language": "zh-CN,zh;q=0.9",
-    "Cookie": ""
+    "Cookie": ""  # 可选：填入B站登录Cookie，大幅提升API同步速度
 }
 
-# 获取单页评论
+# 获取单页评论（核心：纯时间倒序+每页50条）
 def get_bilibili_comments(aid, page=1):
-    url = f"https://api.bilibili.com/x/v2/reply/main?mode=1&oid={aid}&type=1&ps=20&pn={page}"
+    url = f"https://api.bilibili.com/x/v2/reply/main?mode=2&oid={aid}&type=1&ps=50&pn={page}"
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
@@ -29,6 +29,12 @@ def get_bilibili_comments(aid, page=1):
         if data.get("code") != 0:
             print(f"接口返回错误: {data.get('message')}")
             return None
+        # 打印当前页最新/最早评论时间，方便排查
+        replies = data.get("data", {}).get("replies", [])
+        if replies:
+            latest_time = datetime.fromtimestamp(replies[0]["ctime"]).strftime("%Y-%m-%d %H:%M:%S")
+            earliest_time = datetime.fromtimestamp(replies[-1]["ctime"]).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"第{page}页 | 最新：{latest_time} | 最早：{earliest_time} | 共{len(replies)}条")
         return data
     except Exception as e:
         print(f"获取第{page}页评论失败: {str(e)}")
@@ -48,20 +54,19 @@ def get_sub_reply_detail(root_rpid, aid):
         print(f"获取楼中楼详情失败(rpid={root_rpid}): {str(e)}")
         return []
 
-# 生成评论指纹
+# 生成评论指纹（去重核心）
 def generate_comment_fingerprint(comment):
     content = comment["content"].strip().replace("\n", "").replace(" ", "").replace("\t", "")
     time_str = comment["time"]
     return hashlib.md5(f"{content}_{time_str}".encode('utf-8')).hexdigest()
 
-# 提取UP主评论（全量容错）
+# 提取UP主评论（全量容错+精准筛选）
 def extract_up_comments(all_comments_data, up_mid):
     up_comments = []
     up_mid_int = int(up_mid) if up_mid else 0
     expire_time = datetime.now() - timedelta(hours=DUPLICATE_EXPIRE_HOURS)
     seen_fingerprints = set()
 
-    # 遍历所有页数据（先判断是否为空）
     if not isinstance(all_comments_data, list):
         return up_comments
     
@@ -69,13 +74,11 @@ def extract_up_comments(all_comments_data, up_mid):
         if not isinstance(comments_data, dict) or "data" not in comments_data:
             continue
         
-        # 顶层评论列表（强制转为列表）
         root_replies = comments_data["data"].get("replies", [])
         if not isinstance(root_replies, list):
             root_replies = []
         
         for root_reply in root_replies:
-            # 基础字段容错
             if not isinstance(root_reply, dict) or "mid" not in root_reply or "content" not in root_reply:
                 continue
             
@@ -87,7 +90,8 @@ def extract_up_comments(all_comments_data, up_mid):
             if root_mid == up_mid_int:
                 try:
                     comment_time = datetime.fromtimestamp(root_reply["ctime"])
-                    if comment_time >= expire_time:
+                    # 只保留"发布时间在监控窗口内"且"当前时间-发布时间>5分钟（API同步）"
+                    if comment_time >= expire_time and (datetime.now() - comment_time).total_seconds() > 300:
                         comment_info = {
                             "rpid": str(root_rpid),
                             "content": root_content,
@@ -99,22 +103,22 @@ def extract_up_comments(all_comments_data, up_mid):
                         if fingerprint not in seen_fingerprints:
                             seen_fingerprints.add(fingerprint)
                             up_comments.append(comment_info)
+                            print(f"抓到UP主顶层评论：{comment_time} | {root_content[:20]}...")
                 except Exception as e:
                     print(f"处理顶层评论失败(rpid={root_rpid}): {str(e)}")
                     continue
             
-            # 2. 楼中楼回复（双重容错：强制转为列表）
+            # 2. 楼中楼回复（双重容错）
             sub_replies = root_reply.get("replies", [])
             if not isinstance(sub_replies, list):
                 sub_replies = []
             
-            # 3. 补充楼中楼详情（确保是列表）
+            # 3. 补充楼中楼详情
             if CHECK_SUB_REPLY_DETAIL:
                 sub_detail = get_sub_reply_detail(root_rpid, VIDEO_AID)
                 if isinstance(sub_detail, list):
                     sub_replies += sub_detail
             
-            # 遍历楼中楼（先判断是否为列表）
             if not isinstance(sub_replies, list):
                 continue
             
@@ -126,8 +130,7 @@ def extract_up_comments(all_comments_data, up_mid):
                 if sub_mid == up_mid_int:
                     try:
                         sub_time = datetime.fromtimestamp(sub_reply["ctime"])
-                        if sub_time >= expire_time:
-                            # 被回复评论内容容错
+                        if sub_time >= expire_time and (datetime.now() - sub_time).total_seconds() > 300:
                             root_content_show = root_content[:30] + "..." if len(root_content) > 30 else root_content
                             comment_info = {
                                 "rpid": str(sub_reply.get("rpid")),
@@ -140,11 +143,14 @@ def extract_up_comments(all_comments_data, up_mid):
                             if fingerprint not in seen_fingerprints:
                                 seen_fingerprints.add(fingerprint)
                                 up_comments.append(comment_info)
+                                print(f"抓到UP主楼中楼回复：{sub_time} | {sub_reply['content'].get('message', '')[:20]}...")
                     except Exception as e:
                         print(f"处理楼中楼评论失败: {str(e)}")
                         continue
     
-    print(f"最终筛选出UP主近{DUPLICATE_EXPIRE_HOURS}小时的唯一评论/回复数：{len(up_comments)}")
+    # 按发布时间倒序排序，最新的在前面
+    up_comments.sort(key=lambda x: x["time"], reverse=True)
+    print(f"\n最终筛选出UP主近{DUPLICATE_EXPIRE_HOURS}小时的唯一评论/回复数：{len(up_comments)}")
     return up_comments
 
 # 推送消息（带重试）
@@ -173,7 +179,7 @@ def send_to_serverchan(title, content, retry=2):
 # 主函数
 def main():
     print(f"=== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始监控 ===")
-    print(f"监控UP主：{UP_MID} | 视频：{VIDEO_AID} | 近{DUPLICATE_EXPIRE_HOURS}小时 | 抓取前{MAX_PAGE}页")
+    print(f"监控UP主：{UP_MID} | 视频：{VIDEO_AID} | 近{DUPLICATE_EXPIRE_HOURS}小时 | 抓取前{MAX_PAGE}页（每页50条）")
     
     # 配置检查
     if not all([SENDKEY, UP_MID, VIDEO_AID]):
@@ -193,17 +199,17 @@ def main():
     # 提取UP主评论
     up_comments = extract_up_comments(all_comments_data, UP_MID)
     if not up_comments:
-        print("未检测到UP主近12小时的新评论/回复")
+        print("未检测到UP主近24小时的新评论/回复（已过滤5分钟内未同步的评论）")
         return
     
-    # 构造推送内容
-    title = f"🚨 B站UP主新回复！{datetime.now().strftime('%H:%M:%S')}"
-    content = f"### UP主 {UP_MID} 近{DUPLICATE_EXPIRE_HOURS}小时评论/回复\n\n"
+    # 构造推送内容（按时间倒序）
+    title = f"🚨 B站UP主新评论！{datetime.now().strftime('%H:%M:%S')}（共{len(up_comments)}条）"
+    content = f"### UP主 {UP_MID} 近{DUPLICATE_EXPIRE_HOURS}小时最新评论/回复\n\n"
     for idx, comment in enumerate(up_comments):
-        content += f"#### {idx+1}. {comment['type']} | {comment['time']}\n"
+        content += f"#### {idx+1}. **{comment['type']}** | {comment['time']}\n"
         if comment['type'] == "楼中楼回复":
             content += f"**被回复评论**：{comment['root_comment']}\n"
-        content += f"**回复内容**：{comment['content']}\n\n"
+        content += f"**内容**：{comment['content']}\n\n"
     
     # 推送
     send_to_serverchan(title, content)
@@ -214,6 +220,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"脚本运行出错: {str(e)}")
-        # 出错时推送提醒
         if SENDKEY:
             send_to_serverchan("❌ B站监控脚本运行出错", f"错误信息：{str(e)}\n时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
