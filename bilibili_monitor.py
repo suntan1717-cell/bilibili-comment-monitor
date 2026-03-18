@@ -17,7 +17,7 @@ HEADERS = {
 }
 
 def load_history_comments():
-    """加载历史评论记录（用于对比新评论）"""
+    """加载历史评论记录"""
     try:
         if os.path.exists(HISTORY_FILE):
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
@@ -44,7 +44,8 @@ def bv_to_oid(bv_id):
         resp = requests.get(url, headers=HEADERS, timeout=10)
         data = resp.json()
         return data["data"]["aid"] if data.get("code") == 0 else None
-    except:
+    except Exception as e:
+        print(f"❌ BV转OID异常：{e}")
         return None
 
 def get_up_comments(oid, up_mid):
@@ -52,7 +53,7 @@ def get_up_comments(oid, up_mid):
     up_comments = []
     up_mid_int = int(up_mid) if (up_mid and up_mid.isdigit()) else 0
     
-    for page in range(1, 6):  # 5分钟运行，只抓前5页（更快）
+    for page in range(1, 6):  # 仅抓前5页，适配5分钟运行
         try:
             url = f"https://api.bilibili.com/x/v2/reply/main?mode=2&oid={oid}&type=1&ps=50&pn={page}"
             resp = requests.get(url, headers=HEADERS, timeout=10)
@@ -71,13 +72,13 @@ def get_up_comments(oid, up_mid):
                     ctime = datetime.fromtimestamp(root_reply["ctime"]).strftime("%Y-%m-%d %H:%M:%S")
                     content = root_reply["content"].get("message", "").strip()
                     up_comments.append({
-                        "id": f"{root_reply.get('rpid')}",  # 唯一标识
+                        "id": f"{root_reply.get('rpid', '')}",  # 唯一标识
                         "type": "顶层评论",
                         "time": ctime,
                         "content": content
                     })
 
-                # 楼中楼
+                # 楼中楼回复
                 sub_replies = root_reply.get("replies", [])
                 if not isinstance(sub_replies, list):
                     sub_replies = []
@@ -88,55 +89,76 @@ def get_up_comments(oid, up_mid):
                         ctime = datetime.fromtimestamp(sub_reply["ctime"]).strftime("%Y-%m-%d %H:%M:%S")
                         content = sub_reply["content"].get("message", "").strip()
                         up_comments.append({
-                            "id": f"{sub_reply.get('rpid')}",  # 唯一标识
+                            "id": f"{sub_reply.get('rpid', '')}",  # 唯一标识
                             "type": "楼中楼回复",
                             "time": ctime,
                             "content": content
                         })
             import time
-            time.sleep(0.5)  # 缩短间隔，适配5分钟运行
-        except:
+            time.sleep(0.5)  # 缩短间隔，适配高频运行
+        except Exception as e:
+            print(f"⚠️ 抓取第{page}页异常：{e}")
             continue
 
     # 去重（按唯一ID）
     unique_comments = []
     seen_ids = set()
     for c in up_comments:
-        if c["id"] not in seen_ids:
+        if c["id"] and c["id"] not in seen_ids:
             seen_ids.add(c["id"])
             unique_comments.append(c)
     return unique_comments
 
 def get_new_comments(current_comments, history_comments):
     """对比历史，获取新增评论"""
-    history_ids = {c["id"] for c in history_comments}
+    history_ids = {c["id"] for c in history_comments if c["id"]}
     new_comments = [c for c in current_comments if c["id"] not in history_ids]
     return new_comments
 
 def send_wechat(title, content):
     """发送微信推送"""
     if not SENDKEY:
+        print("❌ SendKey未配置")
         return False
     try:
         url = f"https://sctapi.ftqq.com/{SENDKEY}.send"
-        data = {"title": title, "desp": content, "channel": 9}
+        data = {
+            "title": title,
+            "desp": content,
+            "channel": 9  # 强制微信服务号通道
+        }
         resp = requests.post(url, data=data, timeout=20)
-        return resp.json().get("code") == 0
-    except:
+        resp_json = resp.json()
+        if resp_json.get("code") == 0:
+            print("✅ 微信推送成功")
+            return True
+        else:
+            print(f"❌ 推送失败：{resp_json.get('message')}")
+            return False
+    except Exception as e:
+        print(f"❌ 推送异常：{e}")
         return False
 
 def main():
     print(f"=== 启动监控 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     
     # 1. 配置校验
-    if not all([SENDKEY, UP_MID, BV_ID]):
-        print("❌ 配置不全")
+    config_ok = True
+    if not SENDKEY:
+        print("❌ 配置缺失：SENDKEY为空")
+        config_ok = False
+    if not (UP_MID and UP_MID.isdigit()):
+        print("❌ 配置缺失：UP_MID为空或非数字")
+        config_ok = False
+    if not (BV_ID and BV_ID.startswith("BV")):
+        print("❌ 配置缺失：BV_ID为空或格式错误")
+        config_ok = False
+    if not config_ok:
         return
 
     # 2. BV转OID
     oid = bv_to_oid(BV_ID)
     if not oid:
-        print("❌ BV转OID失败")
         return
 
     # 3. 加载历史评论
@@ -151,18 +173,14 @@ def main():
     new_comments = get_new_comments(current_comments, history_comments)
     print(f"ℹ️ 新增评论数：{len(new_comments)}")
 
-    # 6. 仅当有新增评论时推送+保存历史
+    # 6. 仅新增评论时推送+保存历史
     if new_comments:
-        print("✅ 检测到新评论，准备推送")
         # 构造推送内容
         content = f"### UP主 {UP_MID} 新评论（{len(new_comments)}条）\n\n"
         for idx, c in enumerate(new_comments, 1):
             content += f"{idx}. **{c['type']}** | {c['time']}\n{c['content']}\n\n"
         # 推送微信
-        if send_wechat(f"🚨 UP主新评论 | {datetime.now().strftime('%H:%M')}", content):
-            print("✅ 微信推送成功")
-        else:
-            print("❌ 微信推送失败")
+        send_wechat(f"🚨 UP主新评论 | {datetime.now().strftime('%H:%M')}", content)
         # 保存最新评论到历史文件
         save_history_comments(current_comments)
     else:
@@ -174,4 +192,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"❌ 脚本出错：{e}")
+        error_msg = f"❌ 脚本运行出错：{str(e)}"
+        print(error_msg)
+        # 出错时推送提醒
+        if SENDKEY:
+            send_wechat("❌ B站监控脚本异常", error_msg)
