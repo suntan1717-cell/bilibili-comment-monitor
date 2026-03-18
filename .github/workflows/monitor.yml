@@ -28,7 +28,7 @@ jobs:
         env:
           SENDKEY: ${{ secrets.SENDKEY }}
           UP_MID: ${{ secrets.UP_MID }}
-          VIDEO_AID: ${{ secrets.VIDEO_AID }}
+          BV_ID: ${{ secrets.BV_ID }}
         run: python bilibili_monitor.py
 
       - name: 保存推送记录
