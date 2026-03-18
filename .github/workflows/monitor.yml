@@ -2,8 +2,8 @@ name: B站UP主评论监控
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 每5分钟运行
-  workflow_dispatch:        # 手动触发
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -26,5 +26,6 @@ jobs:
           SENDKEY: ${{ secrets.SENDKEY }}
           UP_MID: ${{ secrets.UP_MID }}
           BV_ID: ${{ secrets.BV_ID }}
+          BILI_COOKIE: ${{ secrets.BILI_COOKIE }}  # 新增Cookie变量
         run: |
           python bilibili_monitor.py
