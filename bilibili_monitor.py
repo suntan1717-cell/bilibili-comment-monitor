@@ -15,7 +15,7 @@ LAST_FILE = "last_comments.json"
 CST       = timezone(timedelta(hours=8))
 # =================================================
 
-# 基础请求头（简化，减少出错）
+# 基础请求头（适配B站）
 def get_headers():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -57,7 +57,7 @@ def bv_to_aid(bv):
         return None
 
 # ------------------------------
-# 3. 抓取评论（极致空值防护）
+# 3. 抓取评论（适配ps=20参数）
 # ------------------------------
 def get_up_comments(aid):
     target_mid = int(UP_MID) if (UP_MID and UP_MID.isdigit()) else 0
@@ -65,22 +65,26 @@ def get_up_comments(aid):
     up_ids = set()
     total_comments = 0
 
-    print(f"🔍 目标UP主ID：{target_mid}，开始抓取评论...")
+    print(f"🔍 目标UP主ID：{target_mid}，开始抓取评论（ps=20适配B站限制）...")
 
-    for page in range(1, 6):
-        time.sleep(random.uniform(1, 3))  # 简单延迟
+    # 抓前10页，ps=20（B站强制上限）
+    for page in range(1, 11):
+        time.sleep(random.uniform(1, 3))
         try:
-            # 改用更简单的评论接口（减少字段，降低出错）
-            url = f"https://api.bilibili.com/x/v2/reply?type=1&oid={aid}&pn={page}&ps=50&sort=2"
+            # 核心修复：ps=20（B站允许的最大单页条数）
+            url = f"https://api.bilibili.com/x/v2/reply?type=1&oid={aid}&pn={page}&ps=20&sort=2"
             resp = requests.get(url, headers=get_headers(), timeout=10)
             resp.encoding = "utf-8"
             data = resp.json()
 
             if data.get("code") != 0:
-                print(f"⚠️ 第{page}页接口错误：{data.get('message')}")
+                if data.get("message") == "ps out of bounds":
+                    print(f"⚠️ 第{page}页：B站参数限制，已自动适配ps=20仍失败")
+                else:
+                    print(f"⚠️ 第{page}页接口错误：{data.get('message')}")
                 continue
 
-            # 核心：强制转成列表，避免None
+            # 空值防护
             replies = data.get("data", {}).get("replies", [])
             if not isinstance(replies, list):
                 replies = []
@@ -89,19 +93,18 @@ def get_up_comments(aid):
             total_comments += page_comment_count
             print(f"ℹ️ 第{page}页：共{page_comment_count}条评论")
 
-            # 遍历顶层评论（极致空值防护）
+            # 遍历顶层评论
             for r in replies:
-                # 所有字段先判空，再取值
                 r_mid = r.get("mid", 0) if isinstance(r, dict) else 0
                 rpid = str(r.get("rpid", "")) if isinstance(r, dict) else ""
                 r_ctime = r.get("ctime", 0) if isinstance(r, dict) else 0
                 r_content = r.get("content", {}) if isinstance(r, dict) else {}
                 r_msg = r_content.get("message", "").strip() if isinstance(r_content, dict) else ""
 
-                # 打印调试：核对mid是否匹配
-                print(f"   评论mid={r_mid}，目标mid={target_mid} → {'匹配' if r_mid == target_mid else '不匹配'}")
+                # 调试mid匹配
+                print(f"   评论mid={r_mid} → {'匹配UP主' if r_mid == target_mid else '非UP主'}")
 
-                # 筛选UP主顶层评论
+                # 筛选UP主评论
                 if r_mid == target_mid and rpid and r_msg:
                     up_comments.append({
                         "id": rpid,
@@ -111,7 +114,7 @@ def get_up_comments(aid):
                     up_ids.add(rpid)
                     print(f"✅ 抓到UP主评论：[{up_comments[-1]['time']}] {r_msg[:20]}...")
 
-                # 楼中楼评论（极致防护）
+                # 楼中楼评论
                 subs = r.get("replies", []) if isinstance(r, dict) else []
                 if not isinstance(subs, list):
                     subs = []
@@ -130,6 +133,11 @@ def get_up_comments(aid):
                         })
                         up_ids.add(sub_rpid)
                         print(f"✅ 抓到UP主楼中楼：[{up_comments[-1]['time']}] {sub_msg[:20]}...")
+
+            # 无更多评论则停止
+            if page_comment_count < 20:
+                print(f"ℹ️ 第{page}页评论不足20条，无更多评论")
+                break
 
         except Exception as e:
             print(f"⚠️ 第{page}页抓取异常：{str(e)[:50]}")
