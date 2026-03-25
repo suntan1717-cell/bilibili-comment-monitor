@@ -9,25 +9,42 @@ from datetime import datetime, timedelta, timezone
 UP_MID    = os.getenv("UP_MID")
 BV_ID     = os.getenv("BV_ID")
 BILI_COOKIE = os.getenv("BILI_COOKIE", "")
-SENDKEY   = os.getenv("SENDKEY")  # 改回 Server酱
+SENDKEY   = os.getenv("SENDKEY")
 
-LAST_FILE = "last_comments.json"
+LAST_IDS_FILE = "last_comment_ids.json"  # 只存已推送的评论ID
 LAST_TIME_FILE = "last_push_time.json"
 CST       = timezone(timedelta(hours=8))
 # =================================================
 
-# 基础请求头
 def get_headers():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": f"https://www.bilibili.com/video/{BV_ID}/",
         "Cookie": BILI_COOKIE,
         "Accept": "application/json, text/plain, */*",
     }
-    return headers
 
 # ------------------------------
-# 上次推送时间
+# 1. 评论ID去重（核心修复）
+# ------------------------------
+def load_last_ids():
+    try:
+        if os.path.exists(LAST_IDS_FILE):
+            with open(LAST_IDS_FILE, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+    except:
+        pass
+    return set()
+
+def save_last_ids(ids):
+    try:
+        with open(LAST_IDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(ids), f, ensure_ascii=False)
+    except:
+        pass
+
+# ------------------------------
+# 2. 推送时间记录
 # ------------------------------
 def load_last_push_time():
     try:
@@ -46,26 +63,7 @@ def save_last_push_time(timestamp):
         pass
 
 # ------------------------------
-# 评论ID记录
-# ------------------------------
-def load_last_comment_ids():
-    try:
-        if os.path.exists(LAST_FILE):
-            with open(LAST_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-    except:
-        pass
-    return set()
-
-def save_current_comment_ids(ids):
-    try:
-        with open(LAST_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(ids), f, ensure_ascii=False)
-    except:
-        pass
-
-# ------------------------------
-# BV 转 aid
+# 3. BV 转 aid
 # ------------------------------
 def bv_to_aid(bv):
     try:
@@ -77,17 +75,15 @@ def bv_to_aid(bv):
         return None
 
 # ------------------------------
-# 抓取评论（按上次推送时间筛选）
+# 4. 抓取评论（按ID去重）
 # ------------------------------
 def get_up_comments(aid):
     target_mid = int(UP_MID) if (UP_MID and UP_MID.isdigit()) else 0
     up_comments = []
-    up_ids = set()
+    last_ids = load_last_ids()
     total_comments = 0
 
-    last_push_ts = load_last_push_time()
-    last_push_time = datetime.fromtimestamp(last_push_ts, CST) if last_push_ts > 0 else "首次运行"
-    print(f"🔍 目标UP主ID：{target_mid} | 上次推送时间：{last_push_time}")
+    print(f"🔍 目标UP主ID：{target_mid} | 已推送评论数：{len(last_ids)}")
 
     for page in range(1, 11):
         time.sleep(random.uniform(1, 3))
@@ -116,20 +112,17 @@ def get_up_comments(aid):
                 r_content = r.get("content", {}) if isinstance(r, dict) else {}
                 r_msg = r_content.get("message", "").strip() if isinstance(r_content, dict) else ""
 
-                if last_push_ts > 0 and r_ctime < last_push_ts:
-                    print(f"⏩ 第{page}页已到历史评论，停止抓取")
-                    return up_comments, up_ids
-
+                # 核心：用评论ID去重，只要推过就不再推
+                if rpid in last_ids:
+                    continue
                 if r_mid == target_mid and rpid and r_msg:
                     comment_time = datetime.fromtimestamp(r_ctime, CST).strftime("%m-%d %H:%M:%S")
                     up_comments.append({
                         "id": rpid,
                         "time": comment_time,
-                        "ts": r_ctime,
                         "text": r_msg
                     })
-                    up_ids.add(rpid)
-                    print(f"✅ 抓到UP主新评论：[{comment_time}] {r_msg[:20]}...")
+                    print(f"✅ 抓到新评论：[{comment_time}] {r_msg[:20]}...")
 
                 subs = r.get("replies", []) if isinstance(r, dict) else []
                 if not isinstance(subs, list):
@@ -141,18 +134,16 @@ def get_up_comments(aid):
                     sub_content = sub.get("content", {}) if isinstance(sub, dict) else {}
                     sub_msg = sub_content.get("message", "").strip() if isinstance(sub_content, dict) else ""
 
-                    if last_push_ts > 0 and sub_ctime < last_push_ts:
+                    if sub_rpid in last_ids:
                         continue
                     if sub_mid == target_mid and sub_rpid and sub_msg:
                         comment_time = datetime.fromtimestamp(sub_ctime, CST).strftime("%m-%d %H:%M:%S")
                         up_comments.append({
                             "id": sub_rpid,
                             "time": comment_time,
-                            "ts": sub_ctime,
                             "text": sub_msg
                         })
-                        up_ids.add(sub_rpid)
-                        print(f"✅ 抓到UP主楼中楼新评论：[{comment_time}] {sub_msg[:20]}...")
+                        print(f"✅ 抓到楼中楼新评论：[{comment_time}] {sub_msg[:20]}...")
 
             if page_comment_count < 20:
                 print(f"ℹ️ 第{page}页评论不足20条，无更多评论")
@@ -164,40 +155,40 @@ def get_up_comments(aid):
 
     print(f"\n📊 抓取总结：")
     print(f"   - 总评论数：{total_comments}")
-    print(f"   - 新增UP主评论：{len(up_comments)}")
-    return up_comments, up_ids
+    print(f"   - 本次新增评论数：{len(up_comments)}")
+    return up_comments
 
 # ------------------------------
-# Server酱 推送（已换回）
+# 5. Server酱推送（先存ID，再推送）
 # ------------------------------
 def send_serverchan(new_comments):
     if not new_comments:
         print("ℹ️ 无新增评论，不推送")
-        return
+        return set()
 
     title = f"🆕 UP主新增评论 {len(new_comments)} 条"
     content = "\n\n".join([f"【{c['time']}】{c['text']}" for c in new_comments])
+    new_ids = {c["id"] for c in new_comments}
 
     if not SENDKEY:
         print("❌ 未配置 SENDKEY")
-        return
+        return set()
 
     try:
         url = f"https://sctapi.ftqq.com/{SENDKEY}.send"
-        data = {
-            "title": title,
-            "desp": content,
-            "channel": 9
-        }
-        resp = requests.post(url, data=data, timeout=10)
-        if resp.status_code == 200 and resp.json().get("code") == 0:
-            print("✅ Server酱 推送成功！")
-            current_ts = int(time.time())
-            save_last_push_time(current_ts)
+        data = {"title": title, "desp": content, "channel": 9}
+        resp = requests.post(url, data=data, timeout=15)
+        resp_data = resp.json()
+
+        if resp.status_code == 200 and resp_data.get("code") == 0:
+            print("✅ Server酱推送成功！")
+            return new_ids  # 只有推送成功，才返回新ID
         else:
-            print(f"❌ 推送失败：{resp.text}")
+            print(f"❌ 推送失败：{resp_data.get('message')}")
+            return set()
     except Exception as e:
         print(f"❌ 推送异常：{e}")
+        return set()
 
 # ------------------------------
 # 主逻辑
@@ -216,8 +207,15 @@ if __name__ == "__main__":
         exit()
     print(f"✅ BV={BV_ID} → OID={aid}")
 
-    new_comments, current_ids = get_up_comments(aid)
-    send_serverchan(new_comments)
-    save_current_comment_ids(current_ids)
+    new_comments = get_up_comments(aid)
+    new_ids = send_serverchan(new_comments)
+
+    if new_ids:
+        # 推送成功后，合并ID并保存
+        last_ids = load_last_ids()
+        last_ids.update(new_ids)
+        save_last_ids(last_ids)
+        save_last_push_time(int(time.time()))
+        print(f"📌 已保存{len(new_ids)}条新评论ID")
 
     print("=== 🎯 监控结束 ===\n")
