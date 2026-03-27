@@ -1,44 +1,33 @@
 name: B站UP主评论监控
-- name: 💾 保存去重数据
-  run: |
-    git config --global user.name "github-actions"
-    git config --global user.email "actions@github.com"
 
-    # ✅ 先 add
-    git add last_comment_ids.json last_push_time.json || true
-
-    # ✅ 再 commit（如果有变更）
-    git diff --cached --quiet || git commit -m "update comment ids"
-
-    # ✅ 再 pull（避免冲突）
-    git pull --rebase
-
-    # ✅ 最后 push
-    git push
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/10 * * * *'   # 每10分钟执行
   workflow_dispatch:
 
 permissions:
-  contents: write   # ✅ 必须加，否则不能 push
+  contents: write   # ✅ 必须，否则无法 push
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ 拉取代码
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
+      # 2️⃣ Python环境
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # 3️⃣ 安装依赖
       - name: 📦 安装依赖
         run: pip install requests
 
+      # 4️⃣ 运行脚本
       - name: ▶️ 运行监控
         env:
           SENDKEY: ${{ secrets.SENDKEY }}
@@ -47,18 +36,24 @@ jobs:
           BILI_COOKIE: ${{ secrets.BILI_COOKIE }}
         run: python bilibili_monitor.py
 
-      # ✅ 核心：保存去重数据（关键步骤）
+      # 5️⃣ 保存去重数据（最终稳定版）
       - name: 💾 保存去重数据
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
 
-          # 防止冲突
-          git pull --rebase
-
+          # ✅ 添加文件
           git add last_comment_ids.json last_push_time.json || true
 
-          # 只有有变更才提交
-          git diff --cached --quiet || git commit -m "update comment ids"
+          # ✅ 如果有变化才提交
+          if ! git diff --cached --quiet; then
+            git commit -m "update comment ids"
+          else
+            echo "No changes to commit"
+          fi
 
-          git push
+          # ✅ 拉取远程最新（防冲突）
+          git pull --rebase || echo "Rebase skipped"
+
+          # ✅ 推送
+          git push || echo "Nothing to push"
